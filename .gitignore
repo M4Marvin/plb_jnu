@@ -1,15 +1,41 @@
 data/
 
 
-# Directories
-__pycache__/    # Python cache
-venv/           # Python virtual environment
-
-# File types
-*.pyc           # Python compiled files
-*.log           # Log files
-*.tmp           # Temporary files
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.env
 
 # Specific files
 .env            # Environment variables
 config.ini      # Configuration files
+
+# Model checkpoints and results
+results/checkpoints/*
+*.pth
+*.pt
+*.ckpt
+
+# Notebooks
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
