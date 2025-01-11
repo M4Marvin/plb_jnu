@@ -1,0 +1,15 @@
+data/
+
+
+# Directories
+__pycache__/    # Python cache
+venv/           # Python virtual environment
+
+# File types
+*.pyc           # Python compiled files
+*.log           # Log files
+*.tmp           # Temporary files
+
+# Specific files
+.env            # Environment variables
+config.ini      # Configuration files
