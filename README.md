@@ -29,15 +29,18 @@ biopandas
 ## Project Structure
 
 ``` bash
-├── data/
-│   ├── processed/          # Processed mol2 files and HDF5 datasets
-│   └── raw/               # Original PDBbind data
-├── src/
-│   ├── models/            # Neural network architectures
-│   ├── preprocessing/     # Data processing scripts
-│   └── training/         # Training and evaluation scripts
-├── notebooks/            # Analysis and visualization notebooks
-└── results/             # Experimental results and model checkpoints
+├── LICENSE
+├── README.md
+├── data
+│   ├── pdb_bind
+│   │   ├── refined-set              # Refined Set Data
+│   │   └── v2020-other-PL          # General Set
+│   └── sample_data
+├── notebooks
+└── src
+    ├── models
+    ├── preprocessing
+    └── training
 ```
 
 ## Setup
