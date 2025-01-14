@@ -1,14 +1,28 @@
-from pydantic import BaseModel, DirectoryPath, FilePath, validator
-from typing import Dict, List
+from pydantic import BaseModel, DirectoryPath, FilePath
+from typing import Dict, Optional
 from pathlib import Path
 import pandas as pd
 
 
+class FilePattern(BaseModel):
+    pocket_pdb: str = "{pdb_id}_pocket.pdb"
+    protein_pdb: str = "{pdb_id}_protein.pdb"
+    ligand_mol2: str = "{pdb_id}_ligand.mol2"
+    charged_pocket_mol2: str = "{pdb_id}_charged_pocket.mol2"
+
+    def get_path(self, base_path: Path, pdb_id: str, pattern: str) -> Path:
+        return base_path / getattr(self, pattern).format(pdb_id=pdb_id)
+
+
+# Create a single instance to be used throughout
+PATTERNS = FilePattern()
+
+
 class PDBBindComplex(BaseModel):
     pdb_id: str
-    pocket_pdb: FilePath
     protein_pdb: FilePath
     ligand_mol2: FilePath
+    charged_pocket_mol2: Optional[FilePath] = None
     affinity: float
     set_type: str  # "general" or "refined"
 
@@ -19,11 +33,16 @@ class PDBBindComplex(BaseModel):
         """Create a complex from PDB ID and base directory"""
         return cls(
             pdb_id=pdb_id,
-            pocket_pdb=base_path / f"{pdb_id}_pocket.pdb",
-            protein_pdb=base_path / f"{pdb_id}_protein.pdb",
-            ligand_mol2=base_path / f"{pdb_id}_ligand.mol2",
+            protein_pdb=PATTERNS.get_path(base_path, pdb_id, "protein_pdb"),
+            ligand_mol2=PATTERNS.get_path(base_path, pdb_id, "ligand_mol2"),
             affinity=affinity,
             set_type=set_type,
+        )
+
+    def set_charged_pocket(self, base_path: Path):
+        """Set the charged pocket mol2 file path after preprocessing"""
+        self.charged_pocket_mol2 = PATTERNS.get_path(
+            base_path, self.pdb_id, "charged_pocket_mol2"
         )
 
 
