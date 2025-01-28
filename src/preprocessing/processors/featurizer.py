@@ -1,230 +1,767 @@
+import pickle
+
 import numpy as np
-from biopandas.mol2 import PandasMol2
-from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass
-from math import ceil
-import warnings
+
+from openbabel import pybel
+from math import ceil, sin, cos, sqrt, pi
+from itertools import combinations
 
 
-@dataclass
-class FeaturizerConfig:
-    """Configuration for molecular featurization"""
+# class Featurizer:
+#     def __init__(
+#         self,
+#         atom_codes=None,
+#         atom_labels=None,
+#         named_properties=None,
+#         save_molecule_codes=True,
+#         custom_properties=None,
+#         smarts_properties=None,
+#         smarts_labels=None,
+#     ):
+#         # Remember namse of all features in the correct order
+#         self.FEATURE_NAMES = []
 
-    atom_codes: Optional[Dict[str, int]] = (
-        None  # Changed to str keys for MOL2 atom types
-    )
-    atom_labels: Optional[List[str]] = None
-    save_molecule_codes: bool = True
-    custom_properties: Optional[List[callable]] = None
+#         if atom_codes is not None:
+#             if not isinstance(atom_codes, dict):
+#                 raise TypeError(
+#                     "Atom codes should be dict, got %s instead" % type(atom_codes)
+#                 )
+#             codes = set(atom_codes.values())
+#             for i in range(len(codes)):
+#                 if i not in codes:
+#                     raise ValueError("Incorrect atom code %s" % i)
+
+#             self.NUM_ATOM_CLASSES = len(codes)
+#             self.ATOM_CODES = atom_codes
+#             if atom_labels is not None:
+#                 if len(atom_labels) != self.NUM_ATOM_CLASSES:
+#                     raise ValueError(
+#                         "Incorrect number of atom labels: "
+#                         "%s instead of %s" % (len(atom_labels), self.NUM_ATOM_CLASSES)
+#                     )
+#             else:
+#                 atom_labels = ["atom%s" % i for i in range(self.NUM_ATOM_CLASSES)]
+#             self.FEATURE_NAMES += atom_labels
+#         else:
+#             self.ATOM_CODES = {}
+
+#             metals = (
+#                 [3, 4, 11, 12, 13]
+#                 + list(range(19, 32))
+#                 + list(range(37, 51))
+#                 + list(range(55, 84))
+#                 + list(range(87, 104))
+#             )
+
+#             # List of tuples (atomic_num, class_name) with atom types to encode.
+#             atom_classes = [
+#                 (5, "B"),
+#                 (6, "C"),
+#                 (7, "N"),
+#                 (8, "O"),
+#                 (15, "P"),
+#                 (16, "S"),
+#                 (34, "Se"),
+#                 ([9, 17, 35, 53], "halogen"),
+#                 (metals, "metal"),
+#             ]
+
+#             for code, (atom, name) in enumerate(atom_classes):
+#                 if type(atom) is list:
+#                     for a in atom:
+#                         self.ATOM_CODES[a] = code
+#                 else:
+#                     self.ATOM_CODES[atom] = code
+#                 self.FEATURE_NAMES.append(name)
+
+#             self.NUM_ATOM_CLASSES = len(atom_classes)
+
+#         if named_properties is not None:
+#             if not isinstance(named_properties, (list, tuple, np.ndarray)):
+#                 raise TypeError("named_properties must be a list")
+#             allowed_props = [
+#                 prop for prop in dir(pybel.Atom) if not prop.startswith("__")
+#             ]
+#             for prop_id, prop in enumerate(named_properties):
+#                 if prop not in allowed_props:
+#                     raise ValueError(
+#                         "named_properties must be in pybel.Atom attributes,"
+#                         " %s was given at position %s" % (prop_id, prop)
+#                     )
+#             self.NAMED_PROPS = named_properties
+#         else:
+#             # Update the default properties to use heavydegree instead of heavyvalence
+#             self.NAMED_PROPS = ["hyb", "heavydegree", "heterodegree", "partialcharge"]
+
+#         if not isinstance(save_molecule_codes, bool):
+#             raise TypeError(
+#                 "save_molecule_codes should be bool, got %s "
+#                 "instead" % type(save_molecule_codes)
+#             )
+#         self.save_molecule_codes = save_molecule_codes
+#         if save_molecule_codes:
+#             # Remember if an atom belongs to the ligand or to the protein
+#             self.FEATURE_NAMES.append("molcode")
+
+#         self.CALLABLES = []
+#         if custom_properties is not None:
+#             for i, func in enumerate(custom_properties):
+#                 if not callable(func):
+#                     raise TypeError(
+#                         "custom_properties should be list of"
+#                         " callables, got %s instead" % type(func)
+#                     )
+#                 name = getattr(func, "__name__", "")
+#                 if name == "":
+#                     name = "func%s" % i
+#                 self.CALLABLES.append(func)
+#                 self.FEATURE_NAMES.append(name)
+
+#         if smarts_properties is None:
+#             # SMARTS definition for other properties
+#             self.SMARTS = [
+#                 "[#6+0!$(*~[#7,#8,F]),SH0+0v2,s+0,S^3,Cl+0,Br+0,I+0]",
+#                 "[a]",
+#                 "[!$([#1,#6,F,Cl,Br,I,o,s,nX3,#7v5,#15v5,#16v4,#16v6,*+1,*+2,*+3])]",
+#                 "[!$([#6,H0,-,-2,-3]),$([!H0;#7,#8,#9])]",
+#                 "[r]",
+#             ]
+#             smarts_labels = ["hydrophobic", "aromatic", "acceptor", "donor", "ring"]
+#         elif not isinstance(smarts_properties, (list, tuple, np.ndarray)):
+#             raise TypeError("smarts_properties must be a list")
+#         else:
+#             self.SMARTS = smarts_properties
+
+#         if smarts_labels is not None:
+#             if len(smarts_labels) != len(self.SMARTS):
+#                 raise ValueError(
+#                     "Incorrect number of SMARTS labels: %s"
+#                     " instead of %s" % (len(smarts_labels), len(self.SMARTS))
+#                 )
+#         else:
+#             smarts_labels = ["smarts%s" % i for i in range(len(self.SMARTS))]
+
+#         # Compile patterns
+#         self.compile_smarts()
+#         self.FEATURE_NAMES += smarts_labels
+
+#     def compile_smarts(self):
+#         self.__PATTERNS = []
+#         for smarts in self.SMARTS:
+#             self.__PATTERNS.append(pybel.Smarts(smarts))
+
+#     def encode_num(self, atomic_num):
+#         """Encode atom type with a binary vector. If atom type is not included in
+#         the `atom_classes`, its encoding is an all-zeros vector.
+
+#         Parameters
+#         ----------
+#         atomic_num: int
+#             Atomic number
+
+#         Returns
+#         -------
+#         encoding: np.ndarray
+#             Binary vector encoding atom type (one-hot or null).
+#         """
+
+#         if not isinstance(atomic_num, int):
+#             raise TypeError(
+#                 "Atomic number must be int, %s was given" % type(atomic_num)
+#             )
+
+#         encoding = np.zeros(self.NUM_ATOM_CLASSES)
+#         try:
+#             encoding[self.ATOM_CODES[atomic_num]] = 1.0
+#         except:
+#             pass
+#         return encoding
+
+#     def find_smarts(self, molecule):
+#         """Find atoms that match SMARTS patterns.
+
+#         Parameters
+#         ----------
+#         molecule: pybel.Molecule
+
+#         Returns
+#         -------
+#         features: np.ndarray
+#             NxM binary array, where N is the number of atoms in the `molecule`
+#             and M is the number of patterns. `features[i, j]` == 1.0 if i'th
+#             atom has j'th property
+#         """
+
+#         if not isinstance(molecule, pybel.Molecule):
+#             raise TypeError(
+#                 "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+#             )
+
+#         features = np.zeros((len(molecule.atoms), len(self.__PATTERNS)))
+
+#         for pattern_id, pattern in enumerate(self.__PATTERNS):
+#             atoms_with_prop = (
+#                 np.array(list(*zip(*pattern.findall(molecule))), dtype=int) - 1
+#             )
+#             features[atoms_with_prop, pattern_id] = 1.0
+#         return features
+
+#     def get_features(self, molecule, molcode=None):
+#         """Get coordinates and features for all heavy atoms in the molecule.
+
+#         Parameters
+#         ----------
+#         molecule: pybel.Molecule
+#         molcode: float, optional
+#             Molecule type. You can use it to encode whether an atom belongs to
+#             the ligand (1.0) or to the protein (-1.0) etc.
+
+#         Returns
+#         -------
+#         coords: np.ndarray, shape = (N, 3)
+#             Coordinates of all heavy atoms in the `molecule`.
+#         features: np.ndarray, shape = (N, F)
+#             Features of all heavy atoms in the `molecule`: atom type
+#             (one-hot encoding), pybel.Atom attributes, type of a molecule
+#             (e.g protein/ligand distinction), and other properties defined with
+#             SMARTS patterns
+#         """
+
+#         if not isinstance(molecule, pybel.Molecule):
+#             raise TypeError(
+#                 "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+#             )
+#         if molcode is None:
+#             if self.save_molecule_codes is True:
+#                 raise ValueError(
+#                     "save_molecule_codes is set to True,"
+#                     " you must specify code for the molecule"
+#                 )
+#         elif not isinstance(molcode, (float, int)):
+#             raise TypeError("motlype must be float, %s was given" % type(molcode))
+
+#         coords = []
+#         features = []
+#         heavy_atoms = []
+
+#         for i, atom in enumerate(molecule):
+#             # ignore hydrogens and dummy atoms (they have atomicnum set to 0)
+#             if atom.atomicnum > 1:
+#                 heavy_atoms.append(i)
+#                 coords.append(atom.coords)
+
+#                 features.append(
+#                     np.concatenate(
+#                         (
+#                             self.encode_num(atom.atomicnum),
+#                             [atom.__getattribute__(prop) for prop in self.NAMED_PROPS],
+#                             [func(atom) for func in self.CALLABLES],
+#                         )
+#                     )
+#                 )
+
+#         coords = np.array(coords, dtype=np.float32)
+#         features = np.array(features, dtype=np.float32)
+#         if self.save_molecule_codes:
+#             features = np.hstack((features, molcode * np.ones((len(features), 1))))
+#         features = np.hstack([features, self.find_smarts(molecule)[heavy_atoms]])
+
+#         if np.isnan(features).any():
+#             raise RuntimeError("Got NaN when calculating features")
+
+#         return coords, features
+
+#     def to_pickle(self, fname="featurizer.pkl"):
+#         """Save featurizer in a given file. Featurizer can be restored with
+#         `from_pickle` method.
+
+#         Parameters
+#         ----------
+#         fname: str, optional
+#            Path to file in which featurizer will be saved
+#         """
+
+#         # patterns can't be pickled, we need to temporarily remove them
+#         patterns = self.__PATTERNS[:]
+#         del self.__PATTERNS
+#         try:
+#             with open(fname, "wb") as f:
+#                 pickle.dump(self, f)
+#         finally:
+#             self.__PATTERNS = patterns[:]
+
+#     @staticmethod
+#     def from_pickle(fname):
+#         """Load pickled featurizer from a given file
+
+#         Parameters
+#         ----------
+#         fname: str, optional
+#            Path to file with saved featurizer
+
+#         Returns
+#         -------
+#         featurizer: Featurizer object
+#            Loaded featurizer
+#         """
+#         with open(fname, "rb") as f:
+#             featurizer = pickle.load(f)
+#         featurizer.compile_smarts()
+#         return featurizer
+
+
+# def rotation_matrix(axis, theta):
+#     """Counterclockwise rotation about a given axis by theta radians"""
+
+#     if not isinstance(axis, (np.ndarray, list, tuple)):
+#         raise TypeError("axis must be an array of floats of shape (3,)")
+#     try:
+#         axis = np.asarray(axis, dtype=float)
+#     except ValueError:
+#         raise ValueError("axis must be an array of floats of shape (3,)")
+
+#     if axis.shape != (3,):
+#         raise ValueError("axis must be an array of floats of shape (3,)")
+
+#     if not isinstance(theta, (float, int)):
+#         raise TypeError("theta must be a float")
+
+#     axis = axis / sqrt(np.dot(axis, axis))
+#     a = cos(theta / 2.0)
+#     b, c, d = -axis * sin(theta / 2.0)
+#     aa, bb, cc, dd = a * a, b * b, c * c, d * d
+#     bc, ad, ac, ab, bd, cd = b * c, a * d, a * c, a * b, b * d, c * d
+#     return np.array(
+#         [
+#             [aa + bb - cc - dd, 2 * (bc + ad), 2 * (bd - ac)],
+#             [2 * (bc - ad), aa + cc - bb - dd, 2 * (cd + ab)],
+#             [2 * (bd + ac), 2 * (cd - ab), aa + dd - bb - cc],
+#         ]
+#     )
+
+
+# # Create matrices for all possible 90* rotations of a box
+# ROTATIONS = [rotation_matrix([1, 1, 1], 0)]
+
+# # about X, Y and Z - 9 rotations
+# for a1 in range(3):
+#     for t in range(1, 4):
+#         axis = np.zeros(3)
+#         axis[a1] = 1
+#         theta = t * pi / 2.0
+#         ROTATIONS.append(rotation_matrix(axis, theta))
+
+# # about each face diagonal - 6 rotations
+# for a1, a2 in combinations(range(3), 2):
+#     axis = np.zeros(3)
+#     axis[[a1, a2]] = 1.0
+#     theta = pi
+#     ROTATIONS.append(rotation_matrix(axis, theta))
+#     axis[a2] = -1.0
+#     ROTATIONS.append(rotation_matrix(axis, theta))
+
+# # about each space diagonal - 8 rotations
+# for t in [1, 2]:
+#     theta = t * 2 * pi / 3
+#     axis = np.ones(3)
+#     ROTATIONS.append(rotation_matrix(axis, theta))
+#     for a1 in range(3):
+#         axis = np.ones(3)
+#         axis[a1] = -1
+#         ROTATIONS.append(rotation_matrix(axis, theta))
+
+
+# def rotate(coords, rotation):
+#     """Rotate coordinates by a given rotation
+
+#     Parameters
+#     ----------
+#     coords: array-like, shape (N, 3)
+#         Arrays with coordinates and features for each atoms.
+#     rotation: int or array-like, shape (3, 3)
+#         Rotation to perform. You can either select predefined rotation by
+#         giving its index or specify rotation matrix.
+
+#     Returns
+#     -------
+#     coords: np.ndarray, shape = (N, 3)
+#         Rotated coordinates.
+#     """
+
+#     global ROTATIONS
+
+#     if not isinstance(coords, (np.ndarray, list, tuple)):
+#         raise TypeError("coords must be an array of floats of shape (N, 3)")
+#     try:
+#         coords = np.asarray(coords, dtype=float)
+#     except ValueError:
+#         raise ValueError("coords must be an array of floats of shape (N, 3)")
+#     shape = coords.shape
+#     if len(shape) != 2 or shape[1] != 3:
+#         raise ValueError("coords must be an array of floats of shape (N, 3)")
+
+#     if isinstance(rotation, int):
+#         if rotation >= 0 and rotation < len(ROTATIONS):
+#             return np.dot(coords, ROTATIONS[rotation])
+#         else:
+#             raise ValueError("Invalid rotation number %s!" % rotation)
+#     elif isinstance(rotation, np.ndarray) and rotation.shape == (3, 3):
+#         return np.dot(coords, rotation)
+
+#     else:
+#         raise ValueError("Invalid rotation %s!" % rotation)
+
+
+# # TODO: add make_grid variant for GPU
+
+
+# def make_grid(coords, features, grid_resolution=1.0, max_dist=10.0):
+#     """Convert atom coordinates and features represented as 2D arrays into a
+#     fixed-sized 3D box.
+
+#     Parameters
+#     ----------
+#     coords, features: array-likes, shape (N, 3) and (N, F)
+#         Arrays with coordinates and features for each atoms.
+#     grid_resolution: float, optional
+#         Resolution of a grid (in Angstroms).
+#     max_dist: float, optional
+#         Maximum distance between atom and box center. Resulting box has size of
+#         2*`max_dist`+1 Angstroms and atoms that are too far away are not
+#         included.
+
+#     Returns
+#     -------
+#     coords: np.ndarray, shape = (M, M, M, F)
+#         4D array with atom properties distributed in 3D space. M is equal to
+#         2 * `max_dist` / `grid_resolution` + 1
+#     """
+
+#     try:
+#         coords = np.asarray(coords, dtype=float)
+#     except ValueError:
+#         raise ValueError("coords must be an array of floats of shape (N, 3)")
+#     c_shape = coords.shape
+#     if len(c_shape) != 2 or c_shape[1] != 3:
+#         raise ValueError("coords must be an array of floats of shape (N, 3)")
+
+#     N = len(coords)
+#     try:
+#         features = np.asarray(features, dtype=float)
+#     except ValueError:
+#         raise ValueError("features must be an array of floats of shape (N, F)")
+#     f_shape = features.shape
+#     if len(f_shape) != 2 or f_shape[0] != N:
+#         raise ValueError("features must be an array of floats of shape (N, F)")
+
+#     if not isinstance(grid_resolution, (float, int)):
+#         raise TypeError("grid_resolution must be float")
+#     if grid_resolution <= 0:
+#         raise ValueError("grid_resolution must be positive")
+
+#     if not isinstance(max_dist, (float, int)):
+#         raise TypeError("max_dist must be float")
+#     if max_dist <= 0:
+#         raise ValueError("max_dist must be positive")
+
+#     num_features = f_shape[1]
+#     max_dist = float(max_dist)
+#     grid_resolution = float(grid_resolution)
+
+#     box_size = ceil(2 * max_dist / grid_resolution + 1)
+
+#     # move all atoms to the neares grid point
+#     grid_coords = (coords + max_dist) / grid_resolution
+#     grid_coords = grid_coords.round().astype(int)
+
+#     # remove atoms outside the box
+#     in_box = ((grid_coords >= 0) & (grid_coords < box_size)).all(axis=1)
+#     grid = np.zeros((1, box_size, box_size, box_size, num_features), dtype=np.float32)
+#     for (x, y, z), f in zip(grid_coords[in_box], features[in_box]):
+#         grid[0, x, y, z] += f
+
+#     return grid
 
 
 class Featurizer:
-    """Calculates atomic features for MOL2 format molecules using BioPandas.
-    Features encode atom type and properties for machine learning applications.
-    """
-
-    def __init__(self, config: Optional[FeaturizerConfig] = None):
-        """Initialize featurizer with given configuration
-
-        Parameters
-        ----------
-        config : FeaturizerConfig, optional
-            Configuration for featurization. If None, uses default settings.
-        """
-        if config is None:
-            config = FeaturizerConfig()
-
+    def __init__(
+        self,
+        atom_codes=None,
+        atom_labels=None,
+        named_properties=None,
+        save_molecule_codes=True,
+        custom_properties=None,
+        smarts_properties=None,
+        smarts_labels=None,
+    ):
+        # initialize list to store names of all features in the correct order
         self.FEATURE_NAMES = []
 
-        # Setup atom codes
-        if config.atom_codes is not None:
-            self._validate_atom_codes(config.atom_codes)
-            self.ATOM_CODES = config.atom_codes
-            self.NUM_ATOM_CLASSES = len(set(config.atom_codes.values()))
-
-            # Setup atom labels
-            if config.atom_labels:
-                if len(config.atom_labels) != self.NUM_ATOM_CLASSES:
-                    raise ValueError(
-                        f"Expected {self.NUM_ATOM_CLASSES} atom labels, got {len(config.atom_labels)}"
-                    )
-                self.FEATURE_NAMES.extend(config.atom_labels)
-            else:
-                self.FEATURE_NAMES.extend(
-                    [f"atom{i}" for i in range(self.NUM_ATOM_CLASSES)]
+        # validate and process atom codes and labels
+        if atom_codes is not None:
+            if not isinstance(atom_codes, dict):
+                raise TypeError(
+                    "Atom codes should be dict, got %s instead" % type(atom_codes)
                 )
-        else:
-            self._setup_default_atom_codes()
 
-        self.save_molecule_codes = config.save_molecule_codes
-        if self.save_molecule_codes:
+            codes = set(atom_codes.values())
+            for i in range(len(codes)):
+                if i not in codes:
+                    raise ValueError("Incorrect atom code %s" % i)
+
+            self.NUM_ATOM_CLASSES = len(codes)
+            self.ATOM_CODES = atom_codes
+
+            if atom_labels is not None:
+                if len(atom_labels) != self.NUM_ATOM_CLASSES:
+                    raise ValueError(
+                        "Incorrect number of atom labels: "
+                        "%s instead of %s" % (len(atom_labels), self.NUM_ATOM_CLASSES)
+                    )
+
+            else:
+                atom_labels = ["atom%s" % i for i in range(self.NUM_ATOM_CLASSES)]
+
+            self.FEATURE_NAMES += atom_labels
+
+        else:
+            self.ATOM_CODES = {}
+            metals = (
+                [3, 4, 11, 12, 13]
+                + list(range(19, 32))
+                + list(range(37, 51))
+                + list(range(55, 84))
+                + list(range(87, 104))
+            )
+
+            # List of tuples (atomic_num, class_name) with atom types to encode
+            atom_classes = [
+                (5, "B"),
+                (6, "C"),
+                (7, "N"),
+                (8, "O"),
+                (15, "P"),
+                (16, "S"),
+                (34, "Se"),
+                ([9, 17, 35, 53], "halogen"),
+                (metals, "metal"),
+            ]
+
+            for code, (atom, name) in enumerate(atom_classes):
+                if type(atom) is list:
+                    for a in atom:
+                        self.ATOM_CODES[a] = code
+
+                else:
+                    self.ATOM_CODES[atom] = code
+
+                self.FEATURE_NAMES.append(name)
+
+            self.NUM_ATOM_CLASSES = len(atom_classes)
+
+        # validate and process named properties
+        if named_properties is not None:
+            if not isinstance(named_properties, (list, tuple, np.ndarray)):
+                raise TypeError("named_properties must be a list")
+
+            allowed_props = [
+                prop for prop in dir(pybel.Atom) if not prop.startswith("__")
+            ]
+
+            for prop_id, prop in enumerate(named_properties):
+                if prop not in allowed_props:
+                    raise ValueError(
+                        "named_properties must be in pybel.Atom attributes,"
+                        " %s was given at position %s" % (prop_id, prop)
+                    )
+
+            self.NAMED_PROPS = named_properties
+
+        else:
+            # pybel.Atom properties to save
+            self.NAMED_PROPS = ["hyb", "heavydegree", "heterodegree", "partialcharge"]
+
+        self.FEATURE_NAMES += self.NAMED_PROPS
+
+        if not isinstance(save_molecule_codes, bool):
+            raise TypeError(
+                "save_molecule_codes should be bool, got %s "
+                "instead" % type(save_molecule_codes)
+            )
+
+        self.save_molecule_codes = save_molecule_codes
+
+        if save_molecule_codes:
+            # Remember if an atom belongs to the ligand or to the protein
             self.FEATURE_NAMES.append("molcode")
 
-        # Setup custom property calculators
-        self.custom_properties = config.custom_properties or []
-        for i, func in enumerate(self.custom_properties):
-            name = getattr(func, "__name__", f"func{i}")
-            self.FEATURE_NAMES.append(name)
+        # process custom callable properties
+        self.CALLABLES = []
 
-    def _validate_atom_codes(self, atom_codes: Dict[str, int]) -> None:
-        """Validate atom codes dictionary"""
-        if not isinstance(atom_codes, dict):
-            raise TypeError(f"Atom codes should be dict, got {type(atom_codes)}")
+        if custom_properties is not None:
+            for i, func in enumerate(custom_properties):
+                if not callable(func):
+                    raise TypeError(
+                        "custom_properties should be list of"
+                        " callables, got %s instead" % type(func)
+                    )
 
-        codes = set(atom_codes.values())
-        for i in range(len(codes)):
-            if i not in codes:
-                raise ValueError(f"Missing atom code {i}")
+                name = getattr(func, "__name__", "")
 
-    def _setup_default_atom_codes(self) -> None:
-        """Setup default atom encoding scheme for common MOL2 atom types"""
-        self.ATOM_CODES = {
-            "C.3": 0,  # sp3 carbon
-            "C.2": 0,  # sp2 carbon
-            "C.1": 0,  # sp carbon
-            "C.ar": 0,  # aromatic carbon
-            "N.3": 1,  # sp3 nitrogen
-            "N.2": 1,  # sp2 nitrogen
-            "N.1": 1,  # sp nitrogen
-            "N.ar": 1,  # aromatic nitrogen
-            "O.3": 2,  # sp3 oxygen
-            "O.2": 2,  # sp2 oxygen
-            "O.co2": 2,  # carboxylate oxygen
-            "S.3": 3,  # sp3 sulfur
-            "S.2": 3,  # sp2 sulfur
-            "P.3": 4,  # sp3 phosphorus
-            "F": 5,  # fluorine
-            "Cl": 5,  # chlorine
-            "Br": 5,  # bromine
-            "I": 5,  # iodine
-        }
+                if name == "":
+                    name = "func%s" % i
 
-        self.FEATURE_NAMES.extend(
-            ["carbon", "nitrogen", "oxygen", "sulfur", "phosphorus", "halogen"]
-        )
+                self.CALLABLES.append(func)
 
-        self.NUM_ATOM_CLASSES = 6  # Number of unique atom types
+                self.FEATURE_NAMES.append(name)
 
-    def encode_atom(self, atom_type: str) -> np.ndarray:
-        """Encode atom type with a binary vector
+        # process SMARTS properties and labels
+        if smarts_properties is None:
+            # SMARTS definition for other properties
+            self.SMARTS = [
+                "[#6+0!$(*~[#7,#8,F]),SH0+0v2,s+0,S^3,Cl+0,Br+0,I+0]",
+                "[a]",
+                "[!$([#1,#6,F,Cl,Br,I,o,s,nX3,#7v5,#15v5,#16v4,#16v6,*+1,*+2,*+3])]",
+                "[!$([#6,H0,-,-2,-3]),$([!H0;#7,#8,#9])]",
+                "[r]",
+            ]
 
-        Parameters
-        ----------
-        atom_type : str
-            MOL2 atom type (e.g., 'C.3', 'O.2', etc.)
+            smarts_labels = ["hydrophobic", "aromatic", "acceptor", "donor", "ring"]
 
-        Returns
-        -------
-        np.ndarray
-            One-hot encoding of atom type
-        """
+        elif not isinstance(smarts_properties, (list, tuple, np.ndarray)):
+            raise TypeError("smarts_properties must be a list")
+
+        else:
+            self.SMARTS = smarts_properties
+
+        if smarts_labels is not None:
+            if len(smarts_labels) != len(self.SMARTS):
+                raise ValueError(
+                    "Incorrect number of SMARTS labels: %s"
+                    " instead of %s" % (len(smarts_labels), len(self.SMARTS))
+                )
+
+        else:
+            smarts_labels = ["smarts%s" % i for i in range(len(self.SMARTS))]
+
+        # Compile SMARTS patterns for matching
+        self.compile_smarts()
+
+        self.FEATURE_NAMES += smarts_labels
+
+    # define function to compile SMARTS patterns for efficient matching
+    def compile_smarts(self):
+        self.__PATTERNS = []
+
+        for smarts in self.SMARTS:
+            self.__PATTERNS.append(pybel.Smarts(smarts))
+
+    # define function to encode the atomic number using one-hot encoding
+    def encode_num(self, atomic_num):
+        if not isinstance(atomic_num, int):
+            raise TypeError(
+                "Atomic number must be int, %s was given" % type(atomic_num)
+            )
+
         encoding = np.zeros(self.NUM_ATOM_CLASSES)
+
         try:
-            encoding[self.ATOM_CODES[atom_type]] = 1.0
-        except KeyError:
-            pass  # Return zero vector for unknown atoms
+            encoding[self.ATOM_CODES[atomic_num]] = 1.0
+
+        except:
+            pass
+
         return encoding
 
-    def get_features(
-        self, mol: PandasMol2, molcode: Optional[float] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract coordinates and features from MOL2 molecule
+    # define function to find substructures in the molecule that match the SMARTS patterns
+    def find_smarts(self, molecule):
+        if not isinstance(molecule, pybel.Molecule):
+            raise TypeError(
+                "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+            )
 
-        Parameters
-        ----------
-        mol : PandasMol2
-            Molecule to featurize
-        molcode : float, optional
-            Code to identify molecule type (e.g., 1.0 for ligand, -1.0 for protein)
+        features = np.zeros((len(molecule.atoms), len(self.__PATTERNS)))
 
-        Returns
-        -------
-        coords : np.ndarray
-            Atomic coordinates, shape (N, 3)
-        features : np.ndarray
-            Atomic features, shape (N, F)
-        """
-        if molcode is None and self.save_molecule_codes:
-            raise ValueError("molcode required when save_molecule_codes is True")
+        for pattern_id, pattern in enumerate(self.__PATTERNS):
+            atoms_with_prop = (
+                np.array(list(*zip(*pattern.findall(molecule))), dtype=int) - 1
+            )
 
-        # Get heavy atoms only
-        atoms_df = mol.df[~mol.df["atom_type"].str.startswith("H")]
+            features[atoms_with_prop, pattern_id] = 1.0
 
-        if len(atoms_df) == 0:
-            raise ValueError("No heavy atoms found in molecule")
+        return features
 
-        # Extract coordinates
-        coords = atoms_df[["x", "y", "z"]].values.astype(np.float32)
+    # define function to extract the features from the molecule
+    def get_features(self, molecule, molcode=None):
+        if not isinstance(molecule, pybel.Molecule):
+            raise TypeError(
+                "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+            )
 
-        # Build feature matrix
+        if molcode is None:
+            if self.save_molecule_codes is True:
+                raise ValueError(
+                    "save_molecule_codes is set to True,"
+                    " you must specify code for the molecule"
+                )
+
+        elif not isinstance(molcode, (float, int)):
+            raise TypeError("motlype must be float, %s was given" % type(molcode))
+
+        coords = []
         features = []
-        for _, atom in atoms_df.iterrows():
-            atom_features = [
-                *self.encode_atom(atom["atom_type"]),
-                *[prop(atom) for prop in self.custom_properties],
-            ]
-            features.append(atom_features)
+        heavy_atoms = []
+
+        for i, atom in enumerate(molecule):
+            # ignore hydrogens and dummy atoms (they have atomicnum set to 0)
+            if atom.atomicnum > 1:
+                heavy_atoms.append(i)
+
+                coords.append(atom.coords)
+
+                features.append(
+                    np.concatenate(
+                        (
+                            self.encode_num(atom.atomicnum),
+                            [atom.__getattribute__(prop) for prop in self.NAMED_PROPS],
+                            [func(atom) for func in self.CALLABLES],
+                        )
+                    )
+                )
+
+        coords = np.array(coords, dtype=np.float32)
 
         features = np.array(features, dtype=np.float32)
 
         if self.save_molecule_codes:
-            features = np.hstack([features, molcode * np.ones((len(features), 1))])
+            features = np.hstack((features, molcode * np.ones((len(features), 1))))
+
+        features = np.hstack([features, self.find_smarts(molecule)[heavy_atoms]])
 
         if np.isnan(features).any():
-            raise RuntimeError("NaN values found in features")
+            raise RuntimeError("Got NaN when calculating features")
 
         return coords, features
 
+    # define function to save the Featurizer to a pickle file
+    def to_pickle(self, fname="featurizer.pkl"):
+        # patterns can't be pickled, we need to temporarily remove them
+        patterns = self.__PATTERNS[:]
 
-def make_grid(
-    coords: np.ndarray,
-    features: np.ndarray,
-    grid_resolution: float = 1.0,
-    max_dist: float = 10.0,
-) -> np.ndarray:
-    """Convert atomic coordinates and features into a 3D grid representation
+        del self.__PATTERNS
 
-    Parameters
-    ----------
-    coords : np.ndarray
-        Atomic coordinates, shape (N, 3)
-    features : np.ndarray
-        Atomic features, shape (N, F)
-    grid_resolution : float
-        Size of grid cells in Angstroms
-    max_dist : float
-        Maximum distance from center of grid
+        try:
+            with open(fname, "wb") as f:
+                pickle.dump(self, f)
 
-    Returns
-    -------
-    np.ndarray
-        4D array of features distributed in 3D space
-        Shape: (1, M, M, M, F) where M = 2 * max_dist / grid_resolution + 1
-    """
-    # Validate inputs
-    if not isinstance(coords, np.ndarray) or coords.shape[1] != 3:
-        raise ValueError("coords must be array of shape (N, 3)")
-    if not isinstance(features, np.ndarray) or len(coords) != len(features):
-        raise ValueError("features must be array of shape (N, F)")
+        finally:
+            self.__PATTERNS = patterns[:]
 
-    num_features = features.shape[1]
-    box_size = ceil(2 * max_dist / grid_resolution + 1)
+    @staticmethod
+    def from_pickle(fname):
+        with open(fname, "rb") as f:
+            featurizer = pickle.load(f)
 
-    # Estimate memory usage
-    grid_size = box_size**3 * num_features * 4  # 4 bytes per float32
-    if grid_size > 1e9:  # 1 GB
-        warnings.warn(f"Grid will use approximately {grid_size / 1e9:.1f}GB of memory")
+        featurizer.compile_smarts()
 
-    # Move atoms to nearest grid points
-    grid_coords = (coords + max_dist) / grid_resolution
-    grid_coords = grid_coords.round().astype(int)
-
-    # Remove atoms outside box
-    in_box = ((grid_coords >= 0) & (grid_coords < box_size)).all(axis=1)
-
-    # Create grid and add features
-    grid = np.zeros((1, box_size, box_size, box_size, num_features), dtype=np.float32)
-    for (x, y, z), f in zip(grid_coords[in_box], features[in_box]):
-        grid[0, x, y, z] += f
-
-    return grid
+        return featurizer

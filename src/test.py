@@ -1,15 +1,319 @@
-from rich import print
+import pickle
 from pathlib import Path
+
 import numpy as np
+import pandas as pd
+from openbabel import pybel
+from rich import print
+
 from preprocessing.models import PDBBindDataset
 from preprocessing.processors.protein import PocketProcessor
-from preprocessing.processors.featurizer import Featurizer, FeaturizerConfig, make_grid
-import pandas as pd
-from biopandas.mol2 import PandasMol2
 
 
-def test_featurization():
-    # Setup paths
+class Featurizer:
+    def __init__(
+        self,
+        atom_codes=None,
+        atom_labels=None,
+        named_properties=None,
+        save_molecule_codes=True,
+        custom_properties=None,
+        smarts_properties=None,
+        smarts_labels=None,
+    ):
+        # Remember namse of all features in the correct order
+        self.FEATURE_NAMES = []
+
+        if atom_codes is not None:
+            if not isinstance(atom_codes, dict):
+                raise TypeError(
+                    "Atom codes should be dict, got %s instead" % type(atom_codes)
+                )
+            codes = set(atom_codes.values())
+            for i in range(len(codes)):
+                if i not in codes:
+                    raise ValueError("Incorrect atom code %s" % i)
+
+            self.NUM_ATOM_CLASSES = len(codes)
+            self.ATOM_CODES = atom_codes
+            if atom_labels is not None:
+                if len(atom_labels) != self.NUM_ATOM_CLASSES:
+                    raise ValueError(
+                        "Incorrect number of atom labels: "
+                        "%s instead of %s" % (len(atom_labels), self.NUM_ATOM_CLASSES)
+                    )
+            else:
+                atom_labels = ["atom%s" % i for i in range(self.NUM_ATOM_CLASSES)]
+            self.FEATURE_NAMES += atom_labels
+        else:
+            self.ATOM_CODES = {}
+
+            metals = (
+                [3, 4, 11, 12, 13]
+                + list(range(19, 32))
+                + list(range(37, 51))
+                + list(range(55, 84))
+                + list(range(87, 104))
+            )
+
+            # List of tuples (atomic_num, class_name) with atom types to encode.
+            atom_classes = [
+                (5, "B"),
+                (6, "C"),
+                (7, "N"),
+                (8, "O"),
+                (15, "P"),
+                (16, "S"),
+                (34, "Se"),
+                ([9, 17, 35, 53], "halogen"),
+                (metals, "metal"),
+            ]
+
+            for code, (atom, name) in enumerate(atom_classes):
+                if type(atom) is list:
+                    for a in atom:
+                        self.ATOM_CODES[a] = code
+                else:
+                    self.ATOM_CODES[atom] = code
+                self.FEATURE_NAMES.append(name)
+
+            self.NUM_ATOM_CLASSES = len(atom_classes)
+
+        if named_properties is not None:
+            if not isinstance(named_properties, (list, tuple, np.ndarray)):
+                raise TypeError("named_properties must be a list")
+            allowed_props = [
+                prop for prop in dir(pybel.Atom) if not prop.startswith("__")
+            ]
+            for prop_id, prop in enumerate(named_properties):
+                if prop not in allowed_props:
+                    raise ValueError(
+                        "named_properties must be in pybel.Atom attributes,"
+                        " %s was given at position %s" % (prop_id, prop)
+                    )
+            self.NAMED_PROPS = named_properties
+        else:
+            # Update the default properties to use heavydegree instead of heavyvalence
+            self.NAMED_PROPS = ["hyb", "heavydegree", "heterodegree", "partialcharge"]
+
+        if not isinstance(save_molecule_codes, bool):
+            raise TypeError(
+                "save_molecule_codes should be bool, got %s "
+                "instead" % type(save_molecule_codes)
+            )
+        self.save_molecule_codes = save_molecule_codes
+        if save_molecule_codes:
+            # Remember if an atom belongs to the ligand or to the protein
+            self.FEATURE_NAMES.append("molcode")
+
+        self.CALLABLES = []
+        if custom_properties is not None:
+            for i, func in enumerate(custom_properties):
+                if not callable(func):
+                    raise TypeError(
+                        "custom_properties should be list of"
+                        " callables, got %s instead" % type(func)
+                    )
+                name = getattr(func, "__name__", "")
+                if name == "":
+                    name = "func%s" % i
+                self.CALLABLES.append(func)
+                self.FEATURE_NAMES.append(name)
+
+        if smarts_properties is None:
+            # SMARTS definition for other properties
+            self.SMARTS = [
+                "[#6+0!$(*~[#7,#8,F]),SH0+0v2,s+0,S^3,Cl+0,Br+0,I+0]",
+                "[a]",
+                "[!$([#1,#6,F,Cl,Br,I,o,s,nX3,#7v5,#15v5,#16v4,#16v6,*+1,*+2,*+3])]",
+                "[!$([#6,H0,-,-2,-3]),$([!H0;#7,#8,#9])]",
+                "[r]",
+            ]
+            smarts_labels = ["hydrophobic", "aromatic", "acceptor", "donor", "ring"]
+        elif not isinstance(smarts_properties, (list, tuple, np.ndarray)):
+            raise TypeError("smarts_properties must be a list")
+        else:
+            self.SMARTS = smarts_properties
+
+        if smarts_labels is not None:
+            if len(smarts_labels) != len(self.SMARTS):
+                raise ValueError(
+                    "Incorrect number of SMARTS labels: %s"
+                    " instead of %s" % (len(smarts_labels), len(self.SMARTS))
+                )
+        else:
+            smarts_labels = ["smarts%s" % i for i in range(len(self.SMARTS))]
+
+        # Compile patterns
+        self.compile_smarts()
+        self.FEATURE_NAMES += smarts_labels
+
+    def compile_smarts(self):
+        self.__PATTERNS = []
+        for smarts in self.SMARTS:
+            self.__PATTERNS.append(pybel.Smarts(smarts))
+
+    def encode_num(self, atomic_num):
+        """Encode atom type with a binary vector. If atom type is not included in
+        the `atom_classes`, its encoding is an all-zeros vector.
+
+        Parameters
+        ----------
+        atomic_num: int
+            Atomic number
+
+        Returns
+        -------
+        encoding: np.ndarray
+            Binary vector encoding atom type (one-hot or null).
+        """
+
+        if not isinstance(atomic_num, int):
+            raise TypeError(
+                "Atomic number must be int, %s was given" % type(atomic_num)
+            )
+
+        encoding = np.zeros(self.NUM_ATOM_CLASSES)
+        try:
+            encoding[self.ATOM_CODES[atomic_num]] = 1.0
+        except:
+            pass
+        return encoding
+
+    def find_smarts(self, molecule):
+        """Find atoms that match SMARTS patterns.
+
+        Parameters
+        ----------
+        molecule: pybel.Molecule
+
+        Returns
+        -------
+        features: np.ndarray
+            NxM binary array, where N is the number of atoms in the `molecule`
+            and M is the number of patterns. `features[i, j]` == 1.0 if i'th
+            atom has j'th property
+        """
+
+        if not isinstance(molecule, pybel.Molecule):
+            raise TypeError(
+                "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+            )
+
+        features = np.zeros((len(molecule.atoms), len(self.__PATTERNS)))
+
+        for pattern_id, pattern in enumerate(self.__PATTERNS):
+            atoms_with_prop = (
+                np.array(list(*zip(*pattern.findall(molecule))), dtype=int) - 1
+            )
+            features[atoms_with_prop, pattern_id] = 1.0
+        return features
+
+    def get_features(self, molecule, molcode=None):
+        """Get coordinates and features for all heavy atoms in the molecule.
+
+        Parameters
+        ----------
+        molecule: pybel.Molecule
+        molcode: float, optional
+            Molecule type. You can use it to encode whether an atom belongs to
+            the ligand (1.0) or to the protein (-1.0) etc.
+
+        Returns
+        -------
+        coords: np.ndarray, shape = (N, 3)
+            Coordinates of all heavy atoms in the `molecule`.
+        features: np.ndarray, shape = (N, F)
+            Features of all heavy atoms in the `molecule`: atom type
+            (one-hot encoding), pybel.Atom attributes, type of a molecule
+            (e.g protein/ligand distinction), and other properties defined with
+            SMARTS patterns
+        """
+
+        if not isinstance(molecule, pybel.Molecule):
+            raise TypeError(
+                "molecule must be pybel.Molecule object, %s was given" % type(molecule)
+            )
+        if molcode is None:
+            if self.save_molecule_codes is True:
+                raise ValueError(
+                    "save_molecule_codes is set to True,"
+                    " you must specify code for the molecule"
+                )
+        elif not isinstance(molcode, (float, int)):
+            raise TypeError("motlype must be float, %s was given" % type(molcode))
+
+        coords = []
+        features = []
+        heavy_atoms = []
+
+        for i, atom in enumerate(molecule):
+            # ignore hydrogens and dummy atoms (they have atomicnum set to 0)
+            if atom.atomicnum > 1:
+                heavy_atoms.append(i)
+                coords.append(atom.coords)
+
+                features.append(
+                    np.concatenate(
+                        (
+                            self.encode_num(atom.atomicnum),
+                            [atom.__getattribute__(prop) for prop in self.NAMED_PROPS],
+                            [func(atom) for func in self.CALLABLES],
+                        )
+                    )
+                )
+
+        coords = np.array(coords, dtype=np.float32)
+        features = np.array(features, dtype=np.float32)
+        if self.save_molecule_codes:
+            features = np.hstack((features, molcode * np.ones((len(features), 1))))
+        features = np.hstack([features, self.find_smarts(molecule)[heavy_atoms]])
+
+        if np.isnan(features).any():
+            raise RuntimeError("Got NaN when calculating features")
+
+        return coords, features
+
+    def to_pickle(self, fname="featurizer.pkl"):
+        """Save featurizer in a given file. Featurizer can be restored with
+        `from_pickle` method.
+
+        Parameters
+        ----------
+        fname: str, optional
+           Path to file in which featurizer will be saved
+        """
+
+        # patterns can't be pickled, we need to temporarily remove them
+        patterns = self.__PATTERNS[:]
+        del self.__PATTERNS
+        try:
+            with open(fname, "wb") as f:
+                pickle.dump(self, f)
+        finally:
+            self.__PATTERNS = patterns[:]
+
+    @staticmethod
+    def from_pickle(fname):
+        """Load pickled featurizer from a given file
+
+        Parameters
+        ----------
+        fname: str, optional
+           Path to file with saved featurizer
+
+        Returns
+        -------
+        featurizer: Featurizer object
+           Loaded featurizer
+        """
+        with open(fname, "rb") as f:
+            featurizer = pickle.load(f)
+        featurizer.compile_smarts()
+        return featurizer
+
+
+if __name__ == "__main__":
     data_root = Path("data/pdb_bind")
     general_dataset_path = data_root / "general-set"
     refined_dataset_path = data_root / "refined-set"
@@ -28,75 +332,12 @@ def test_featurization():
     print("\nElement properties:")
     print(elements.head())
 
-    # Create custom property calculator using element properties
-    def get_vdw_radius(atom_row):
-        atom_type = atom_row["atom_type"].split(".")[
-            0
-        ]  # Get base element from MOL2 type
-        try:
-            return float(
-                elements[elements["symbol"] == atom_type]["vdw_radius"].iloc[0]
-            )
-        except (IndexError, KeyError):
-            return 2.0  # Default value
-
-    # Initialize featurizer with custom property
-    config = FeaturizerConfig(
-        save_molecule_codes=True, custom_properties=[get_vdw_radius]
-    )
-    featurizer = Featurizer(config)
+    featurizer = Featurizer()
 
     # Process ligand
-    print("\nProcessing ligand...")
-    ligand_mol = PandasMol2().read_mol2(complex_1a4h.ligand_mol2)
-    ligand_coords, ligand_features = featurizer.get_features(ligand_mol, molcode=1.0)
-    print(
-        f"Ligand: {ligand_features.shape[0]} atoms, {ligand_features.shape[1]} features"
-    )
+    ligand = next(pybel.readfile("mol2", str(complex_1a4h.ligand_mol2)))
+    lig_coords, lig_features = featurizer.get_features(ligand, molcode=1)
 
-    # Process protein pocket
-    print("\nProcessing protein pocket...")
-    pocket_mol = PandasMol2().read_mol2(complex_1a4h.charged_pocket_mol2)
-    pocket_coords, pocket_features = featurizer.get_features(pocket_mol, molcode=-1.0)
-    print(
-        f"Pocket: {pocket_features.shape[0]} atoms, {pocket_features.shape[1]} features"
-    )
-    print(pocket_coords.shape)
-    print(pocket_features.shape)
-
-    # Create grids
-    print("\nCreating feature grids...")
-    ligand_grid = make_grid(ligand_coords, ligand_features)
-    pocket_grid = make_grid(pocket_coords, pocket_features)
-
-    print("\nGrid shapes:")
-    print(f"Ligand grid: {ligand_grid.shape}")
-    print(f"Pocket grid: {pocket_grid.shape}")
-
-    # Print feature names
-    print("\nFeature names:")
-    print(featurizer.FEATURE_NAMES)
-
-    return {
-        "ligand_coords": ligand_coords,
-        "ligand_features": ligand_features,
-        "pocket_coords": pocket_coords,
-        "pocket_features": pocket_features,
-        "ligand_grid": ligand_grid,
-        "pocket_grid": pocket_grid,
-    }
-
-
-if __name__ == "__main__":
-    results = test_featurization()
-
-    # Additional analysis of results
-    print("\nFeature statistics:")
-    for name, features in [
-        ("Ligand", results["ligand_features"]),
-        ("Pocket", results["pocket_features"]),
-    ]:
-        print(f"\n{name}:")
-        print(f"Min values: {features.min(axis=0)}")
-        print(f"Max values: {features.max(axis=0)}")
-        print(f"Mean values: {features.mean(axis=0)}")
+    # Process pocket
+    # pocket = next(pybel.readfile("mol2", str(complex_1a4h.charged_pocket_mol2)))
+    # pocket_coords, pocket_features = featurizer.get_features(pocket, molcode=-1)
